@@ -2,24 +2,52 @@
 <html lang="id">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>AI Hand Security</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Hand Theft Detection</title>
 
 <style>
-body{margin:0;background:black;color:#0f0;font-family:monospace}
-video,canvas{position:absolute;top:0;left:0;width:100vw;height:100vh;object-fit:cover}
-#ui{
+*{box-sizing:border-box}
+body{
+  margin:0;
+  background:black;
+  color:#0f0;
+  font-family:monospace;
+  overflow:hidden;
+}
+video,canvas{
+  position:absolute;
+  top:0;left:0;
+  width:100vw;
+  height:100vh;
+  object-fit:cover;
+}
+canvas{
+  pointer-events:auto;
+  touch-action:none;
+}
+#panel{
   position:fixed;
-  bottom:15px;left:50%;
+  bottom:10px;
+  left:50%;
   transform:translateX(-50%);
-  background:#000c;
+  background:#000d;
   border:1px solid #0f0;
   padding:10px;
+  width:95%;
+  max-width:420px;
 }
 button{
-  background:black;color:#0f0;
+  width:100%;
+  margin:5px 0;
+  padding:10px;
+  background:black;
+  color:#0f0;
   border:1px solid #0f0;
-  padding:8px;margin:5px
+  font-size:14px;
+}
+#status{
+  font-size:12px;
+  margin-top:5px;
 }
 </style>
 </head>
@@ -29,122 +57,177 @@ button{
 <video id="video" autoplay playsinline></video>
 <canvas id="canvas"></canvas>
 
-<div id="ui">
-  <button onclick="switchCam()">GANTI KAMERA</button>
-  <button onclick="lockMode=true">LOCK OBJEK</button>
-  <div id="info">Status: Monitoring</div>
+<div id="panel">
+  <button id="camBtn">GANTI KAMERA</button>
+  <button id="lockBtn">LOCK OBJEK</button>
+  <div id="status">Status: Init...</div>
 </div>
 
-<audio id="alarm" src="alarm.mp3"></audio>
+<audio id="alarm">
+  <source src="alarm.mp3" type="audio/mpeg">
+</audio>
 
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
 
 <script>
-const video=document.getElementById("video")
-const canvas=document.getElementById("canvas")
-const ctx=canvas.getContext("2d")
-const alarm=document.getElementById("alarm")
-let camFacing="environment" // default belakang
-let lockMode=false,locked=null,alarmOn=false
+/* =====================
+   GLOBAL STATE
+===================== */
+const video = document.getElementById("video");
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+const statusBox = document.getElementById("status");
+const alarm = document.getElementById("alarm");
 
-function resize(){
-  canvas.width=video.videoWidth
-  canvas.height=video.videoHeight
-}
-window.onresize=resize
+let facing = "environment";
+let lockMode = false;
+let lockedObject = null;
+let alarmTriggered = false;
 
-async function startCam(){
+/* =====================
+   CAMERA
+===================== */
+async function startCamera(){
   if(window.stream){
-    window.stream.getTracks().forEach(t=>t.stop())
+    window.stream.getTracks().forEach(t=>t.stop());
   }
-  const stream=await navigator.mediaDevices.getUserMedia({
-    video:{facingMode:camFacing}
-  })
-  window.stream=stream
-  video.srcObject=stream
-  video.onloadedmetadata=resize
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video:{facingMode:facing}
+  });
+  window.stream = stream;
+  video.srcObject = stream;
+  video.onloadedmetadata = ()=>{
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    statusBox.innerText = "Status: Kamera aktif ("+facing+")";
+  };
 }
-startCam()
+startCamera();
 
-function switchCam(){
-  camFacing = camFacing==="user" ? "environment" : "user"
-  startCam()
-}
+document.getElementById("camBtn").onclick = ()=>{
+  facing = facing === "user" ? "environment" : "user";
+  startCamera();
+};
 
-// HANDS
-const hands=new Hands({
+/* =====================
+   LOCK OBJECT (ANTI BUG)
+===================== */
+document.getElementById("lockBtn").onclick = ()=>{
+  lockMode = true;
+  statusBox.innerText = "Tap layar untuk LOCK objek";
+};
+
+canvas.addEventListener("pointerdown", e=>{
+  if(!lockMode) return;
+
+  const rect = canvas.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  const y = e.clientY - rect.top;
+
+  lockedObject = {
+    x:x-60, y:y-60,
+    w:120, h:120,
+    ox:x-60, oy:y-60
+  };
+
+  lockMode = false;
+  alarmTriggered = false;
+  statusBox.innerText = "Objek terkunci ✅";
+});
+
+/* =====================
+   MEDIAPIPE HANDS
+===================== */
+const hands = new Hands({
   locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`
-})
+});
 hands.setOptions({
   maxNumHands:1,
   modelComplexity:1,
   minDetectionConfidence:0.6,
   minTrackingConfidence:0.6
-})
-hands.onResults(draw)
+});
 
-const cam=new Camera(video,{
-  onFrame:async()=>{await hands.send({image:video})},
+hands.onResults(drawResult);
+
+const cam = new Camera(video,{
+  onFrame:async()=>{
+    await hands.send({image:video});
+  },
   width:640,height:480
-})
-cam.start()
+});
+cam.start();
 
-canvas.onclick=e=>{
-  if(!lockMode) return
-  const r=canvas.getBoundingClientRect()
-  locked={
-    x:e.clientX-r.left-50,
-    y:e.clientY-r.top-50,
-    w:100,h:100,
-    ox:e.clientX-r.left-50,
-    oy:e.clientY-r.top-50
-  }
-  lockMode=false
-  info.innerText="Objek terkunci"
-}
+/* =====================
+   DRAW & LOGIC
+===================== */
+function drawResult(res){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.drawImage(res.image,0,0,canvas.width,canvas.height);
 
-function draw(res){
-  ctx.clearRect(0,0,canvas.width,canvas.height)
-  ctx.drawImage(res.image,0,0,canvas.width,canvas.height)
-
-  let handTouch=false
+  let handTouch = false;
 
   if(res.multiHandLandmarks){
     res.multiHandLandmarks.forEach(hand=>{
-      ctx.strokeStyle="#00ff00"
-      ctx.lineWidth=2
+      ctx.strokeStyle="#00ff00";
+      ctx.lineWidth=2;
       hand.forEach(p=>{
-        ctx.beginPath()
-        ctx.arc(p.x*canvas.width,p.y*canvas.height,5,0,6.28)
-        ctx.stroke()
-      })
+        ctx.beginPath();
+        ctx.arc(p.x*canvas.width,p.y*canvas.height,5,0,Math.PI*2);
+        ctx.stroke();
+      });
 
-      if(locked){
-        const hx=hand[8].x*canvas.width
-        const hy=hand[8].y*canvas.height
-        if(hx>locked.x&&hx<locked.x+locked.w&&hy>locked.y&&hy<locked.y+locked.h){
-          handTouch=true
+      if(lockedObject){
+        const hx = hand[8].x * canvas.width;
+        const hy = hand[8].y * canvas.height;
+        if(
+          hx>lockedObject.x &&
+          hx<lockedObject.x+lockedObject.w &&
+          hy>lockedObject.y &&
+          hy<lockedObject.y+lockedObject.h
+        ){
+          handTouch = true;
         }
       }
-    })
+    });
   }
 
-  if(locked){
-    ctx.strokeStyle="red"
-    ctx.lineWidth=3
-    ctx.strokeRect(locked.x,locked.y,locked.w,locked.h)
+  if(lockedObject){
+    ctx.strokeStyle="red";
+    ctx.lineWidth=3;
+    ctx.strokeRect(
+      lockedObject.x,
+      lockedObject.y,
+      lockedObject.w,
+      lockedObject.h
+    );
 
-    if(handTouch) locked.x+=2
-
-    const moved=Math.abs(locked.x-locked.ox)>30
-    if(moved&&!alarmOn){
-      alarmOn=true
-      alarm.play()
-      alert("⚠️ Barang Anda telah dicuri!")
+    if(handTouch){
+      lockedObject.x += 2; // simulasi dicuri
     }
+
+    const moved =
+      Math.abs(lockedObject.x - lockedObject.ox) > 30;
+
+    if(moved && !alarmTriggered){
+      alarmTriggered = true;
+      alarm.play().catch(()=>{});
+      alert("⚠️ Barang Anda telah dicuri!");
+    }
+  }
+
+  if(lockMode){
+    ctx.strokeStyle="#0f0";
+    ctx.beginPath();
+    ctx.moveTo(canvas.width/2-20,canvas.height/2);
+    ctx.lineTo(canvas.width/2+20,canvas.height/2);
+    ctx.moveTo(canvas.width/2,canvas.height/2-20);
+    ctx.lineTo(canvas.width/2,canvas.height/2+20);
+    ctx.stroke();
   }
 }
 </script>
+
 </body>
 </html>
